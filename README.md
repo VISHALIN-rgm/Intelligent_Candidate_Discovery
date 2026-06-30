@@ -2,7 +2,7 @@
 title: Redrob Ranker
 emoji: 🎯
 colorFrom: blue
-colorTo: orange
+colorTo: purple
 sdk: gradio
 sdk_version: "5.4.0"
 app_file: app.py
