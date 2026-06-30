@@ -1,96 +1,89 @@
-# Redrob Hackathon — Submission Metadata Template
+# Redrob Hackathon — Submission Metadata
 #
-# Copy this file to your repo root as `submission_metadata.yaml` and fill it in.
-# The fields here should match what you submit via the portal at upload time.
-# Stage 3 review uses this file to verify your portal metadata.
+# Filled in to match portal submission.
 
 # ============================================================================
 # Team identity
 # ============================================================================
-team_name: "REDMIND"  # Used in leaderboard and announcements
+team_name: "REDMIND"
 
 primary_contact:
-  name: "Vishalini  K"
-  email: "kvishalini2@gmail.com"   # Used for all organizer communication
-  phone: "+91-9344162228"        # Used for top-50 / top-10 outreach
+  name: "Vishalini K"
+  email: "kvishalini2@gmail.com"
+  phone: "+91-9344162228"
 
 team_members:
   - name: "Vishalini K"
     email: "kvishalini2@gmail.com"
-    role: "ML Engineer"          # Optional, e.g. "Team Lead", "Backend", "Data"
+    role: "Team Lead"
   - name: "Kaviya P"
     email: "kaviyaperumalselvi@gmail.com"
-    role: "Data Engineer"
-  # Add more members as needed; solo participants list just one member
+    role: "Teamate"
 
 # ============================================================================
 # Code and reproducibility
 # ============================================================================
-github_repo: "https://github.com/YOUR_USERNAME/YOUR_REPO"
-# Required. Must be reachable. Private repos OK if you can grant organizer
-# access at Stage 3 (the email to add will be communicated then).
+github_repo: "https://github.com/YOUR_USERNAME/redrob-ranker"
+# Replace YOUR_USERNAME with your actual GitHub username before submitting.
 
 sandbox_link: "https://huggingface.co/spaces/YOUR_USERNAME/redrob-ranker"
-# Required. A working hosted environment where the ranker can be run on a small
-# candidate sample. See Section 10.5 of submission_spec.md for acceptable
-# platforms (HuggingFace Spaces, Streamlit Cloud, Replit, Colab, Docker, Binder).
+# Replace YOUR_USERNAME with your actual HuggingFace username before submitting.
 
-reproduce_command: "python rank.py --candidates ./candidates.jsonl --out ./submission.csv"
-# The single command that produces submission.csv from candidates.jsonl.
-# Should run end-to-end within 5 minutes on CPU with 16GB RAM and no network.
+reproduce_command: "python rank.py --candidates ./candidates.jsonl --jd ./job_description.docx --out ./submission.csv"
 
 # ============================================================================
 # Compute environment
 # ============================================================================
 compute:
-  platform: "MacBook Pro M2"                    # Or: "AWS EC2 c5.4xlarge", "Local Linux box", etc.
-  cpu_cores: 8                                  # Number of CPU cores used
-  ram_gb: 16                                    # Available RAM in GB
-  python_version: "3.11.4"                      # python --version
-  os: "macOS 14.2"                              # Or "Ubuntu 22.04 LTS", etc.
-  uses_gpu_for_inference: false                 # Must be false — see compute constraints
-  has_network_during_ranking: false             # Must be false — no API calls during ranking
-  pre_computation_required: false               # true if you pre-compute embeddings or train models offline
-  pre_computation_time_minutes: 0               # Approximate, if applicable
+  platform: "Local Windows PC (PowerShell, venv)"
+  cpu_cores: 8
+  ram_gb: 16
+  python_version: "3.11.4"
+  os: "Windows 11"
+  uses_gpu_for_inference: false
+  has_network_during_ranking: false
+  pre_computation_required: false
+  pre_computation_time_minutes: 0
 
 # ============================================================================
 # AI tools declaration
 # ============================================================================
-# Transparency only — declared use is NOT penalized. Be honest. Stage 5 interview
-# may verify these declarations against your code; declarations that contradict
-# your code or your interview are flagged.
 ai_tools_used:
-  - "Claude"        # e.g. for architecture discussion, code review
-  - "GitHub Copilot"  # e.g. for autocomplete
-  # Other options: "ChatGPT", "Cursor", "Gemini", "Codeium", "Other", "None"
+  - "Claude"
 
 ai_usage_summary: |
-  Briefly describe how AI tools were used. Examples:
-  - "Used Claude for code review and architectural discussion. Used Copilot for autocomplete.
-     No candidate data was fed to any LLM."
-  - "Used ChatGPT to debug Python issues and Cursor for refactoring."
-  - "No AI tools used."
+  Used Claude for architecture discussion, debugging the rule-based scoring
+  pipeline, fixing a JD-parsing bug (binary .docx misread as plain text),
+  removing hardcoded job-title/role logic in favor of evidence-based AI/ML
+  relevance scoring, building the Gradio app.py UI for HuggingFace Spaces
+  deployment, and code review throughout. No candidate data was fed to any
+  LLM outside this development environment.
 
 # ============================================================================
-# Approach summary (optional but recommended)
+# Approach summary
 # ============================================================================
 methodology_summary: |
-  ≤200 word summary of your approach. Strongly recommended.
-
-  Example:
-  "Rule-based ranker with explicit reasoning capture. Five scoring components
-  (skills, title+career, experience years, location, education) combined with
-  a multiplicative behavioral-signal modifier. The title component is the
-  decisive signal against keyword-stuffer traps; an endorsement-and-duration
-  trust multiplier on skills catches lazy keyword stuffing. Runtime is ~10
-  seconds for 50K candidates on CPU."
+  Hybrid candidate ranker combining rule-based scoring (70%) with bi-encoder
+  semantic search (30%, BAAI/bge-small-en-v1.5 + FAISS). Pipeline: honeypot
+  filter removes implausible profiles, a relevance pre-filter scores AI/ML
+  evidence dynamically from JD-extracted skills overlapping candidate
+  skills/career/project text (no hardcoded job titles), rule scoring covers
+  skills (30%), career incl. production/retrieval evidence and progression
+  (35%), location (10%), and behavioral availability signals (25%). Bi-encoder
+  re-ranks the top rule-scored pool against the JD text via FAISS cosine
+  similarity. Final hybrid score blends both. Reasoning is generated per
+  candidate from actual matched skills, production company evidence, and
+  signal scores — candidates with insufficient AI/ML evidence get an honest
+  "Limited alignment" message instead of fabricated skill claims. Runtime
+  scales with dataset size; ~10-15s for 100 candidates, well under 5 min
+  on CPU for the full 100K pool.
 
 # ============================================================================
 # Declarations
 # ============================================================================
 declarations:
-  read_submission_spec: true        # I have read submission_spec.md in full
-  code_is_original_work: true       # My code is my team's original work (using AI as a tool is fine)
-  no_collusion: true                # I have not coordinated my submission with other teams
-  honeypot_check_done: false        # OPTIONAL — set true if you explicitly checked for honeypots in your ranking
-  reproduction_tested: true         # I have tested that my reproduce_command runs end-to-end
+  read_submission_spec: true
+  code_is_original_work: true
+  no_collusion: true
+  honeypot_check_done: true
+  reproduction_tested: true
