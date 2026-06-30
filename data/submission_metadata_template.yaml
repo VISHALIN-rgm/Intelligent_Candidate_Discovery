@@ -23,10 +23,10 @@ team_members:
 # ============================================================================
 # Code and reproducibility
 # ============================================================================
-github_repo: "https://github.com/YOUR_USERNAME/redrob-ranker"
+github_repo: "https://github.com/VISHALIN-rgm/Intelligent_Candidate_Discovery"
 # Replace YOUR_USERNAME with your actual GitHub username before submitting.
 
-sandbox_link: "https://huggingface.co/spaces/YOUR_USERNAME/redrob-ranker"
+sandbox_link: "https://huggingface.co/spaces/kvishalini/Redrob-Ranker"
 # Replace YOUR_USERNAME with your actual HuggingFace username before submitting.
 
 reproduce_command: "python rank.py --candidates ./candidates.jsonl --jd ./job_description.docx --out ./submission.csv"

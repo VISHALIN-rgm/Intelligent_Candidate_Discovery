@@ -1,428 +1,268 @@
-# Redrob Hackathon — Intelligent Candidate Discovery & Ranking
+# 🎯 Redrob Ranker
 
-**Track 1 | Team:** `team_xxx`
-**Model:** Hybrid Rule + Semantic Bi-Encoder Pipeline
-**Runtime:** ~1.6 min on 16 GB CPU | **100K candidates → Top 100 ranked**
+**Intelligent Candidate Discovery & Ranking — Redrob Hackathon Submission**
 
----
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FAISS](https://img.shields.io/badge/FAISS-CPU-00599C?logo=meta&logoColor=white)](https://github.com/facebookresearch/faiss)
+[![Sentence Transformers](https://img.shields.io/badge/Sentence--Transformers-BGE--small-FF6F00)](https://www.sbert.net/)
+[![Gradio](https://img.shields.io/badge/Gradio-UI-F97316?logo=gradio&logoColor=white)](https://www.gradio.app/)
+[![HuggingFace Spaces](https://img.shields.io/badge/🤗%20Spaces-Live%20Demo-yellow)](https://huggingface.co/spaces/kvishalini/Redrob-Ranker)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## Table of Contents
+A hybrid rule-based + semantic ranking pipeline that ranks candidates against the Redrob "Senior AI Engineer — Founding Team" job description, built to satisfy the hackathon's compute, format, and reasoning-quality constraints — CPU-only, ≤5 minutes, no network calls during ranking.
 
-1. [Quick Start](#quick-start)
-2. [Architecture Overview](#architecture-overview)
-3. [Pipeline Deep Dive](#pipeline-deep-dive)
-4. [Scoring System](#scoring-system)
-5. [Reasoning Engine](#reasoning-engine)
-6. [Design Decisions](#design-decisions)
-7. [Files & Dependencies](#files--dependencies)
-8. [Reproduce the Submission](#reproduce-the-submission)
+**🔗 Live sandbox:** https://huggingface.co/spaces/kvishalini/Redrob-Ranker
 
 ---
 
-## Quick Start
+## 📋 Table of Contents
 
-```bash
-# Install dependencies
-pip install sentence-transformers faiss-cpu numpy tqdm
-
-# Download the model once (requires network — do this before ranking)
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-
-# Run the ranker (no network required after model download)
-python rank.py \
-  --candidates data/candidates.jsonl \
-  --jd data/job_description.md \
-  --out data/submission.csv
-
-# Validate before submitting
-python data/validate_submission.py data/submission.csv
-```
-
-> **Gzipped input is supported** — `candidates.jsonl.gz` works directly without unpacking.
+- [What this is](#-what-this-is)
+- [Architecture](#-architecture)
+- [Repository structure](#-repository-structure)
+- [Setup](#-setup)
+- [Reproduce the submission CSV](#-reproduce-the-submission-csv)
+- [Run the sandbox UI locally](#-run-the-sandbox-ui-locally)
+- [Scoring methodology](#-scoring-methodology)
+- [Compute constraints compliance](#-compute-constraints-compliance)
+- [Honeypot & trap handling](#-honeypot--trap-handling)
+- [Known limitations](#-known-limitations)
 
 ---
 
-## Architecture Overview
+## 🧠 What this is
 
-```
-100,000 candidates
-       │
-       ▼
-┌─────────────────────────────────────┐
-│  STAGE 1 — Honeypot Filter          │  removes ~21,630 trap/impossible profiles
-└─────────────────────────────────────┘
-       │ ~78,370 clean candidates
-       ▼
-┌─────────────────────────────────────┐
-│  STAGE 2 — Title Pre-filter         │  fast keyword check on title + headline
-└─────────────────────────────────────┘
-       │ ~28,760 relevant candidates
-       ▼
-┌─────────────────────────────────────┐
-│  STAGE 3A — Cheap Sort              │  title fit + YoE in-range, microseconds/candidate
-└─────────────────────────────────────┘
-       │ top 3,000
-       ▼
-┌─────────────────────────────────────┐
-│  STAGE 3B — Full Rule Score         │  4-component weighted score on all 23 signals
-└─────────────────────────────────────┘
-       │ top 300
-       ▼
-┌─────────────────────────────────────┐
-│  STAGE 4 — Bi-Encoder + FAISS       │  all-MiniLM-L6-v2 semantic similarity
-└─────────────────────────────────────┘
-       │ 300 candidates with semantic scores
-       ▼
-┌─────────────────────────────────────┐
-│  STAGE 5 — Hybrid Score             │  Rules 70% + Semantic 30%
-│            YoE Priority Filter      │  in-range candidates fill top 100 first
-└─────────────────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────┐
-│  STAGE 6 — Reasoning Engine         │  per-candidate grounded natural language
-│            Score Breakdown Tag      │  [skills · career · loc · avail]
-└─────────────────────────────────────┘
-       │
-       ▼
-  submission.csv (100 rows)
-```
+The JD asks for a narrow profile: engineers who've shipped **production retrieval/ranking/recommendation systems** at product companies, not just engineers whose skills list contains AI keywords. The dataset is built to punish naive keyword matching — keyword stuffers, "Marketing Manager" titles with a stuffed skills list, plain-language candidates who never name a framework but clearly built the real thing, and ~80 honeypots with internally-impossible profiles.
 
-**Why this architecture?**
-Scoring 28,760 candidates through a full ML pipeline would take 13+ minutes. The two-stage approach (cheap sort → full score on top 3,000) reduces that to ~2 seconds while keeping the quality of a full rule-based scorer on every candidate that matters.
+So this pipeline is deliberately **not** a single embedding-similarity sort. It's a two-stage hybrid:
+
+1. A **rule engine** that reads career history, responsibilities, and projects as text — not just the skills array — to infer production deployment, seniority progression, and product-vs-services company context.
+2. A **bi-encoder semantic layer** (FAISS + sentence-transformers) that catches JD-relevant candidates the keyword rules miss, and vice versa.
+
+The two are blended (`70% rules / 30% semantic`) precisely because keyword rules alone fall for the keyword-stuffing trap, and semantic similarity alone falls for "sounds related but isn't actually a fit."
 
 ---
 
-## Pipeline Deep Dive
-
-### Stage 1 — Honeypot Filter
-
-Removes profiles with impossible or trap signals before any scoring:
-
-| Check | Condition | Why |
-|---|---|---|
-| Timeline impossibility | `total_career_months / stated_years > 2.5` | Can't work 2.5× longer than you've existed |
-| Expert stuffing | `≥5 "expert" skills + 0 total endorsements` | No real expert has zero peer validation |
-| Non-tech title + zero tech evidence | `"accountant"` title + no ML keywords in descriptions | Keyword stuffers |
-
-### Stage 2 — Title Pre-filter
-
-Fast string scan on `current_title + headline` for any of:
-`engineer, scientist, ml, ai, nlp, research, machine learning, data sci, deep learning, llm, python, ranking, retrieval, search, embedding`
-
-No regex — pure `in` check across a frozenset. Runs in milliseconds across 78K candidates.
-
-### Stage 3A — Cheap Sort (title + YoE only)
-
-Each candidate gets a micro-score:
-```
-cheap_score = title_fit(1.0) - title_penalty(0.3) - wrong_domain(0.4) - junior_pen(0.2)
-              + yoe_in_range(0.5)
-```
-All candidates sorted descending. Top 3,000 pass to full scoring. This reduces the expensive stage from 28,760 to 3,000 candidates — a **9.6× speedup** with negligible quality loss.
-
-### Stage 4 — Bi-Encoder + FAISS Semantic Search
-
-Model: `all-MiniLM-L6-v2` (384-dim, 80MB, CPU-fast)
-
-Candidate text is built from title + headline + summary + top 12 skills + top 3 job descriptions (600 char cap). The full JD text is encoded once. FAISS `IndexFlatIP` computes cosine similarity (via normalized inner product) across all 300 pool candidates in milliseconds.
-
-Semantic scores are min-max normalised to [0, 1] before hybrid blending.
-
-### Stage 5 — Hybrid Score + YoE Priority
+## 🏗 Architecture
 
 ```
-hybrid_score = 0.30 × semantic_norm + 0.70 × rule_total
+                         ┌─────────────────────────┐
+                         │   job_description.md    │
+                         │   (.md / .txt / .docx)  │
+                         └────────────┬────────────┘
+                                      │
+                              parse_jd()
+                       (YoE range, target cities/
+                        country, JD skills, seniority,
+                        work mode, "prefers product" flag)
+                                      │
+┌──────────────────────┐             │             ┌─────────────────────────┐
+│  candidates.jsonl(.gz)│            │             │  Rule Engine             │
+│  100,000 candidates   │            ▼             │  rule_score()            │
+└──────────┬────────────┘  ┌──────────────────┐    │  ├─ skill_score   (30%) │
+           │                │  Honeypot filter  │    │  ├─ career_score  (35%) │
+           ▼                │  is_honeypot()    │    │  │   • production      │
+┌──────────────────────┐    └────────┬──────────┘    │  │     inference       │
+│  Stage A: cheap title │             │               │  │   • career          │
+│  pre-filter (regex)   │◄────────────┘               │  │     progression     │
+│  is_relevant()        │                              │  │   • product-co     │
+└──────────┬─────────────┘                             │  │     vs services    │
+           │ top 3,000 by cheap_score()                │  ├─ loc_score     (10%)│
+           ▼                                            │  └─ behav_score  (25%)│
+┌──────────────────────┐                                └────────────┬─────────┘
+│  Stage B: full rule    │───────────────────────────────────────────┘
+│  scoring on 3,000      │
+│  rule_score()          │  → top N (default 100–300) by rule_score.total
+└──────────┬──────────────┘
+           ▼
+┌───────────────────────────────────────────────────────────────────┐
+│  Bi-Encoder Semantic Search                                         │
+│  Model: BAAI/bge-small-en-v1.5 (CPU, offline/cached)                 │
+│  JD text  ──encode──►  jd_embedding                                  │
+│  Candidate cards ──encode──► candidate_embeddings                    │
+│  FAISS IndexFlatIP  ──►  cosine-sim search  ──►  sem_score (0-1)     │
+└──────────────────────────────────┬──────────────────────────────────┘
+                                    ▼
+                  hybrid = 0.30 × semantic + 0.70 × rules
+                                    │
+                          tie-break (within 0.002):
+                 prod-retrieval evidence → JD-exact signal →
+                 product-co ratio → GitHub → response rate → notice period
+                                    │
+                          Top-100 validation pass
+                       (sort order, production-evidence
+                        sanity check on top-20)
+                                    │
+                                    ▼
+                    build_reasoning() → 1–2 sentence,
+                  per-candidate, evidence-grounded justification
+                                    │
+                                    ▼
+                          submission.csv
+              candidate_id, rank, score, reasoning
 ```
 
-**YoE Priority Filter:** In-range candidates (5-9yr) fill the top 100 first. Out-of-range candidates only pad if fewer than 100 in-range candidates exist. This prevents a 12yr candidate from displacing a 7yr candidate purely on semantic similarity.
+### Why two stages of filtering before the bi-encoder?
 
-**Score tie-breaking:** `sort(key=lambda x: (-x[0], x[3]["candidate_id"]))` — deterministic, candidate_id ascending.
+Encoding and FAISS-searching 100,000 candidates on CPU within a 5-minute budget isn't realistic alongside everything else the pipeline does. So:
+
+- **Stage A** (regex title/keyword pre-filter): 100,000 → ~thousands, near-zero cost.
+- **Stage B** (full rule scoring, still cheap — no model inference): narrows to the top 3,000, then the top `--prefilter` (default 100–300) by rule score.
+- **Bi-encoder** only ever touches that final small pool, keeping embedding time bounded regardless of total candidate count.
+
+This is also why the rule engine has to be good on its own — it's responsible for not losing genuine fits before the semantic stage ever sees them.
 
 ---
 
-## Scoring System
-
-The rule score is a weighted sum of four components, all derived from candidate data and JD signals — no hardcoded rank positions.
-
-```
-rule_total = 0.30 × skill_score
-           + 0.35 × career_score
-           + 0.10 × loc_score
-           + 0.25 × behav_score
-```
-
-### Component 1 — Skill Score (30%)
-
-Scores each skill against three tiers derived from the JD:
-
-| Tier | Examples | Weight multiplier |
-|---|---|---|
-| **Tier A** (JD must-haves) | embeddings, FAISS, NDCG, RAG, LTR, vector search, BM25 | Full weight |
-| **Tier B** (nice-to-have) | PyTorch, Docker, Kafka, fine-tuning, AWS | 40% weight |
-| **Penalty** | computer vision, SAP, Tableau, Salesforce | −30% weight |
-
-Per-skill weight is further adjusted by proficiency (`beginner 0.25 → expert 1.2`), endorsements, and duration. Tier A hits above 3 get a capped bonus (`min(0.2, hits × 0.04)`).
-
-Assessment scores from `skill_assessment_scores` add up to `+0.05` per matched skill per 100 points.
-
-### Component 2 — Career Score (35%)
-
-| Signal | Score |
-|---|---|
-| ML-primary title (AI Engineer, ML Engineer, NLP Engineer…) | `+0.35` |
-| ML-adjacent title (Data Scientist, SWE-ML…) | `+0.20` (partial credit) |
-| Wrong domain title (CV Engineer, Speech…) | **Hard cap: career ≤ 0.30** |
-| Junior title for staff role | `−0.15` from title_score |
-| YoE in 5-9yr range | `+0.20` |
-| YoE 1yr outside range | `+0.08` |
-| YoE above ceiling | `0.08 − (overage × 0.03)` continuous decay |
-| Product company production hits (×2+) | `+0.25` |
-| Product company production hits (×1) | `+0.15` |
-| IT services production hits (×2+) | `+0.10` (half credit) |
-| JD exact signals (embedding drift / NDCG / MRR / A/B test in descriptions) | `+0.10` |
-| GitHub score > 50 | `+0.15` |
-| IT services only career + JD prefers product | `−0.10` |
-
-### Component 3 — Location Score (10%)
-
-| Situation | Score |
-|---|---|
-| In target city (Pune/Noida/Hyderabad/Mumbai/Delhi) | `1.00` |
-| In India + willing to relocate | `0.80` |
-| In India, not relocating | `0.60` |
-| Outside India + willing to relocate | `0.35` |
-| Outside India, not relocating | `0.15` |
-| Work mode matches JD (hybrid) | `+0.05` bonus |
-
-### Component 4 — Behavioural Score (25%)
-
-All 20 trackable signals from the 23 Redrob signals are used:
-
-| Signal | Max contribution |
-|---|---|
-| `last_active_date` (≤14d) | 0.20 |
-| `open_to_work_flag` | 0.12 |
-| `recruiter_response_rate` (≥0.7) | 0.12 |
-| `notice_period_days` (≤15d) | 0.15 |
-| `interview_completion_rate` (≥0.8) | 0.08 |
-| `offer_acceptance_rate` (≥0.7) | 0.08 |
-| `avg_response_time_hours` (≤4h) | 0.06 |
-| `saved_by_recruiters_30d` (≥10) | 0.05 |
-| `profile_completeness_score` | 0.05 |
-| `profile_views_received_30d` (≥10) | 0.03 |
-| `applications_submitted_30d` (≥3) | 0.03 |
-| `verified_email` | 0.02 |
-| `verified_phone` | 0.02 |
-| `search_appearance_30d` (≥10) | 0.02 |
-| `connection_count` (≥300) | 0.02 |
-| `linkedin_connected` | 0.01 |
-
-> No artificial floor — a candidate with poor availability signals genuinely scores low on this component.
-
----
-
-## Reasoning Engine
-
-Every row in the submission CSV has a grounded reasoning string built entirely from the candidate's actual data — no templates, no hallucination.
-
-### Three-tier system (score-percentile driven, not rank position)
-
-| Tier | Score threshold | Tone | What's included |
-|---|---|---|---|
-| **Strong** | ≥ p60 of top-100 scores | Confident | Title + YoE + what they shipped + where + ops signals + assessment + GitHub + location + concerns |
-| **Adjacent** | p30 – p60 | Honest | Title + YoE + skills + prod company + one ops signal + assessment + location + one concern |
-| **Filler** | < p30 | Specific gaps | Title + YoE + top 2 skills + location + up to 3 specific derived gaps |
-
-Thresholds are computed from `np.percentile(top100_scores, [60, 30])` after scoring — they adapt to each run's actual distribution.
-
-### Concern surfacing rules
-
-**Strong tier** — collects ALL applicable concerns (not just the first):
-1. No confirmed production deployment
-2. Junior title for senior/staff role
-3. Adjacent title (Data Scientist, SWE-ML) — ML depth unconfirmed
-4. Low skill match (skills < 0.45)
-5. International candidate
-6. Low recruiter response rate
-7. Long notice period
-8. Inactivity
-
-**Filler tier** — builds a specific gap list from actual data:
-- Production gap → states exactly which company type or "no deployment"
-- Title mismatch → states exact title and JD seniority
-- Location → states exact city, whether relocating
-- YoE → states exact years vs ceiling
-- Skill → states score if below 0.35
-- Never uses "marginal JD fit" or any vague filler phrase
-
-### Score breakdown tag (on every row)
-
-```
-[skills 0.85 · career 1.00 · loc 1.00 · avail 0.86]
-```
-
-Appended to every reasoning string. Makes every rank auditable — a recruiter can immediately see which component drove the placement.
-
-### Truncation
-
-`_safe_truncate(text, max_chars)` cuts at the last word boundary before the limit — never mid-word.
-
----
-
-## Design Decisions
-
-### Why 70% rules / 30% semantic?
-
-Semantic similarity (`all-MiniLM-L6-v2`) is a strong signal for relevance but it's undiscriminating — it can't tell the difference between a candidate who *listed* "FAISS" as a skill versus one who *deployed FAISS to production at Zomato handling 10M queries*. The rule scorer captures that distinction precisely. Pure semantic would surface keyword stuffers; pure rules would miss strong candidates with non-standard vocabulary.
-
-### Why two-stage scoring instead of scoring all 28K?
-
-Scoring 28,760 candidates through the full `rule_score` function at 35 candidates/sec = 13+ minutes. The cheap sort (title regex + YoE check, ~microseconds each) narrows to 3,000 with near-zero quality loss because the cheap sort uses the same primary signals (title fit, YoE) that dominate the full score. This achieves sub-2-minute total runtime.
-
-### Why raise skills weight to 30% and lower behavioural to 25%?
-
-In initial runs, candidates with `skills 1.00` were landing at rank 78 (filler) because their availability signals (not open to work, no recent login) were depressing the score. Skills are a stable, long-term signal of fit. Availability is a tie-breaker — it shouldn't override someone who has shipped embedding systems to production. Raising skills weight by 5pp and lowering behavioural by 5pp fixed this distortion.
-
-### Why partial credit for Data Scientist / SWE-ML titles?
-
-The JD explicitly wants an ML Engineer / AI Engineer building ranking and retrieval systems. A Data Scientist title is adjacent — the person may or may not have the systems engineering depth the role needs. Giving these titles `0.20` instead of `0.35` title_score reflects genuine uncertainty about fit without hard-disqualifying them. The concern is then surfaced in reasoning so a human recruiter can verify.
-
-### Why a continuous YoE ceiling penalty instead of a hard cliff?
-
-A binary "in range / out of range" created unfair cliffs: an 8yr candidate and a 12yr candidate got the same penalty. The continuous formula `exp_score = 0.08 − (overage × 0.03)` means 8yr gets `0.05`, 9yr gets `0.02`, 10yr gets `−0.01` — a smooth gradient that reflects the JD's own language: "5-9 is a range, not a requirement."
-
-### Why `all-MiniLM-L6-v2` and not `BAAI/bge-small-en-v1.5`?
-
-Both were tested. `bge-small` has marginally better MTEB scores but `MiniLM-L6` is 2× faster on CPU encode and the quality difference doesn't meaningfully change top-100 composition when the semantic score is only 30% of the hybrid. Speed matters more given the 5-minute constraint.
-
----
-
-## Files & Dependencies
-
-### Repository structure
+## 📁 Repository structure
 
 ```
 redrob-ranker/
-├── rank.py                      # Main ranker — single command produces submission
+├── rank.py                          # CLI entrypoint — the single source of scoring logic
+├── app.py                           # Gradio sandbox UI (imports rank.py directly, no duplicated logic)
+├── requirements.txt                 # Pinned dependencies
+├── submission_metadata.yaml         # Portal metadata mirror (Section 10.2 of submission_spec)
+├── README.md                        # You are here
 ├── data/
-│   ├── candidates.jsonl         # 100K candidate pool (or .jsonl.gz)
-│   ├── job_description.md       # JD file
-│   ├── submission.csv           # Output
-│   └── validate_submission.py   # Format validator
-├── requirements.txt
-├── submission_metadata.yaml
-└── README.md
+│   ├── candidates.jsonl.gz          # Hackathon-provided candidate pool (not committed — see Setup)
+│   ├── job_description.md           # Hackathon-provided JD
+│   └── submission.csv               # Output — generated by rank.py
+└── .gitignore
 ```
-
-### `requirements.txt`
-
-```
-sentence-transformers==2.7.0
-faiss-cpu==1.8.0
-numpy>=1.24
-tqdm>=4.65
-```
-
-> Python 3.9+ required. Tested on Windows 11 (PowerShell) and Ubuntu 22.04.
-
-### Pre-computation note
-
-`all-MiniLM-L6-v2` (~80 MB) must be downloaded before offline ranking:
-
-```bash
-# One-time download (requires network)
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-```
-
-The model is cached at `~/.cache/huggingface/hub/`. The ranking step itself makes **zero network calls** — enforced via `TRANSFORMERS_OFFLINE=1`, `HF_DATASETS_OFFLINE=1`, `HF_HUB_OFFLINE=1`.
 
 ---
 
-## Reproduce the Submission
-
-### Single command
+## ⚙️ Setup
 
 ```bash
-python rank.py --candidates data/candidates.jsonl --out data/submission.csv
+git clone https://github.com/<your-username>/redrob-ranker.git
+cd redrob-ranker
+
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
+pip install -r requirements.txt
 ```
 
-### With all options
+**`requirements.txt`** (pin exact versions you tested with):
+
+```
+sentence-transformers==3.0.1
+faiss-cpu==1.8.0
+numpy==1.26.4
+tqdm==4.66.4
+python-docx==1.1.2
+gradio==5.x
+```
+
+Place the hackathon-provided files under `data/`:
+
+```
+data/candidates.jsonl.gz
+data/job_description.md
+```
+
+> The bi-encoder model (`BAAI/bge-small-en-v1.5`) is loaded via `sentence-transformers` and cached locally on first run (`~/.cache/huggingface`). Pre-download it once with network access — the ranking step itself runs fully offline (`HF_HUB_OFFLINE=1` is set in `rank.py`), per the hackathon's no-network-during-ranking rule.
+
+---
+
+## ▶️ Reproduce the submission CSV
+
+Single command, per Section 10.3 of the submission spec:
 
 ```bash
-python rank.py \
-  --candidates data/candidates.jsonl \
-  --jd data/job_description.md \
-  --out data/submission.csv \
-  --prefilter 300 \
-  --strong-pct 60 \
-  --adjacent-pct 30 \
-  --preview 100
+python rank.py --candidates data/candidates.jsonl.gz --jd data/job_description.md --out data/submission.csv
 ```
 
-### CLI flags
+Optional flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--candidates` | required | Path to `.jsonl` or `.jsonl.gz` |
-| `--jd` | auto-detect | Path to JD markdown (auto-finds `job_description.md` if not given) |
-| `--out` | required | Output CSV path |
-| `--prefilter` | `300` | Pool size passed to bi-encoder (increase for better semantic coverage) |
-| `--strong-pct` | `60` | Score percentile threshold for strong tier |
-| `--adjacent-pct` | `30` | Score percentile threshold for adjacent tier |
-| `--preview` | `100` | Rows to print in terminal preview |
+| `--prefilter` | `300` | Size of the pool fed into the bi-encoder after rule scoring |
+| `--team-id` | `team_xxx` | Used for logging only — rename the output file to your registered team ID before upload |
+| `--preview` | `100` | How many ranked rows to print to console |
+| `--strong-pct` / `--adjacent-pct` | `60.0` / `30.0` | Percentile thresholds used to tag reasoning tier (strong/adjacent/filler) |
 
-### Expected output
+Console output streams progress through 5 stages (JD parsing → candidate loading → rule scoring → semantic search → hybrid ranking + validation) and prints elapsed time at each stage so the 5-minute budget is easy to monitor.
 
-```
-[1/5] Parsing job description...
-      Loaded: job_description.md (1514 words)
-      YoE range     : 5-9 yrs
-      Target cities : ['pune', 'noida', 'hyderabad', 'mumbai', 'delhi', 'ncr']
-      Target country: india
-      JD skills     : 47 detected
-      Seniority     : staff  |  Work mode: hybrid  |  Prefers product: True
-      Weights       : skill 0.3 · career 0.35 · loc 0.1 · avail 0.25
-
-[2/5] Loading candidates...
-      Loaded 100,000 candidates
-      78,370 clean  (21,630 honeypots removed)
-
-[3/5] Fast pre-filter + rule scoring...
-      Fast filter: 78,370 → 28,760 relevant
-      Stage-A filter: 28,760 → 3,000 for full scoring
-      Rule scoring: 100%|████████| 3000/3000 [00:01<00:00]
-
-[4/5] Bi-encoder semantic search (all-MiniLM-L6-v2)...
-      Encoding 300 candidates...
-
-[5/5] Hybrid scoring and writing top 100...
-  Tier thresholds (p60/p30): strong >0.75, adjacent >0.72, filler <=0.72
-
-  Submission written → data/submission.csv
-  Total runtime     : 94.4s (1.6 min)
-```
-
-### Validate
+Validate the output before submitting:
 
 ```bash
 python data/validate_submission.py data/submission.csv
-# Expected: "All checks passed. 100 rows, ranks 1-100, scores non-increasing."
 ```
 
 ---
 
-## Compute Constraints Compliance
+## 🖥 Run the sandbox UI locally
 
-| Constraint | Limit | This submission |
-|---|---|---|
-| Runtime | ≤ 5 min | ~1.6 min |
-| Memory | ≤ 16 GB | ~2 GB peak |
-| GPU | CPU only | ✅ No CUDA |
-| Network | Off | ✅ `TRANSFORMERS_OFFLINE=1` |
-| Disk | ≤ 5 GB | ~80 MB (model weights) |
-| Honeypot rate in top 100 | < 10% | ✅ 0% (explicit filter) |
+The sandbox (also hosted live on HuggingFace Spaces) is a thin Gradio wrapper around the exact same `rank.py` — no duplicated logic, so what you see in the UI is what produced the CSV.
+
+```bash
+python app.py
+```
+
+Opens at `http://127.0.0.1:7860`. Upload a `candidates.jsonl`/`.jsonl.gz` sample (≤100 candidates works fine for a sandbox check) and a JD file, adjust the semantic pool size if you want, and click **Run Ranking**. Live logs stream stage-by-stage, and the ranked table + downloadable CSV appear once complete.
+
+**Live deployed instance:** https://huggingface.co/spaces/kvishalini/Redrob-Ranker
 
 ---
 
-*Built for the Redrob Intelligent Candidate Discovery & Ranking Challenge.*
+## 📊 Scoring methodology
+
+### Rule score (70% of hybrid) — `RuleScores`
+
+| Component | Weight | Captures |
+|---|---|---|
+| Skill score | 30% | Tier-A/Tier-B skill match, with core JD skills (retrieval, ranking, embeddings, vector DB, Python) weighted 1.5× over supporting skills (LangChain, prompt engineering) |
+| Career score | 35% | Title fit, years-of-experience fit to JD range, **inferred production deployment** (not just the word "production" — also infra/scale signal combos), product-company vs. IT-services context, career-seniority progression, academic/demo-only penalty |
+| Location score | 10% | Target-city / target-country match, relocation willingness, work-mode preference alignment |
+| Behavioural/availability score | 25% | Recency of activity, open-to-work flag, recruiter response rate, notice period, interview completion, offer acceptance, profile signals — per the 23 `redrob_signals` fields |
+
+### Semantic score (30% of hybrid)
+
+`BAAI/bge-small-en-v1.5` bi-encoder embeds the JD and each candidate's title + headline + summary + top skills + recent career/project/achievement text, cosine-similarity searched via FAISS `IndexFlatIP`, min-max normalized.
+
+### Tie-breaking
+
+When two hybrid scores land within `0.002` of each other, ties are broken in order by: confirmed production-retrieval evidence → exact JD-terminology match (NDCG/MRR/A-B test mentions) → time-at-product-company ratio → any production evidence → product-engineering ownership signals → GitHub activity → recruiter response rate → shorter notice period. Never by candidate ID alone unless every other signal is also tied.
+
+### Reasoning generation
+
+`build_reasoning()` produces a 1–2 sentence justification per candidate, grounded only in fields actually present in that candidate's profile (no hallucinated skills/employers), referencing the specific JD-relevant evidence found (named technologies, production company, ops signals like NDCG/embedding-drift handling), and honestly flagging concerns (notice period, inactivity, international location, low skill overlap) rather than uniformly positive boilerplate — per Stage 4's manual-review checks in the submission spec.
+
+---
+
+## ✅ Compute constraints compliance
+
+| Constraint | How it's met |
+|---|---|
+| ≤ 5 min wall-clock | Two-stage pre-filtering keeps the bi-encoder pool small (≤300 by default); rule scoring on the 3,000-candidate Stage-B pool is pure Python/regex, no model inference |
+| ≤ 16 GB RAM | No GPU tensors held in memory; `bge-small` is a ~130MB model; FAISS `IndexFlatIP` over ≤300 vectors is negligible |
+| CPU only | `faiss-cpu`, `sentence-transformers` run on CPU; no `.cuda()` calls anywhere in the codebase |
+| No network during ranking | `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `HF_DATASETS_OFFLINE=1` set at the top of `rank.py` — the model must already be cached locally before running the ranking step (see Setup) |
+| ≤ 5 GB disk | No large intermediate artifacts are written; embeddings are computed in-memory per run |
+
+---
+
+## 🪤 Honeypot & trap handling
+
+Per `redrob_signals_doc.md` and the JD's hackathon note, the dataset includes deliberate traps:
+
+- **Honeypots** (`is_honeypot()`): impossible experience-to-tenure ratios, 5+ "expert" skills with zero endorsements, non-technical titles (Marketing Manager, Accountant, etc.) with no corroborating technical evidence in career text — filtered before scoring.
+- **Keyword stuffers**: countered by weighting career *evidence* (production deployment, ops signals, responsibilities text) over raw skills-array presence; a skills list full of AI keywords with no supporting career narrative scores poorly on the career component even if skill score is high.
+- **Plain-language Tier-5 candidates**: the bi-encoder semantic layer and the production-inference text scan (`_infer_production`, `PROD_RETRIEVAL_KW`) deliberately don't require exact keyword matches like "RAG" or "Pinecone" — they catch career narratives that describe the work without naming the framework.
+- **Behavioral twins**: tie-breaking and the behavioural score component differentiate otherwise-identical skill profiles using the 23 `redrob_signals` fields (response rate, notice period, recency, GitHub activity).
+
+---
+
+## ⚠️ Known limitations
+
+- The bi-encoder pool size (`--prefilter`) trades runtime against semantic recall — a too-small pool risks missing strong candidates the rule engine under-scores; current default balances this against the 5-minute budget.
+- Production-inference relies on text-pattern heuristics (`PRODUCTION_KW`, `PROD_RETRIEVAL_KW`) rather than structured signals, so it can occasionally miss production evidence phrased in an unusual way.
+- No GPU/hosted-LLM re-ranking step is used by design, per the compute constraints — this is a deliberate latency-quality tradeoff, not an oversight.
+
+---
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE).
