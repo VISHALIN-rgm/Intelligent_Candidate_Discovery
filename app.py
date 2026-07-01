@@ -2159,8 +2159,9 @@ with gr.Blocks(
     )
 
 if __name__ == "__main__":
-    demo.queue().launch(
-        theme=THEME,
-        css=CUSTOM_CSS,
-        max_file_size="2gb",
-    )
+    import inspect
+    launch_params = inspect.signature(demo.launch).parameters
+    if "theme" in launch_params:
+        demo.queue().launch(theme=THEME, css=CUSTOM_CSS)
+    else:
+        demo.queue().launch()
