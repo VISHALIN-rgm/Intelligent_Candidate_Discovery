@@ -2100,13 +2100,11 @@ with gr.Blocks(
                 gr.HTML('<div class="section-label">👥 Candidate pool</div>')
                 candidates_file = gr.File(
                     label="Any file — JSONL / JSONL.GZ recommended, format is auto-detected",
-                    file_types=None,
                 )
 
                 gr.HTML('<div class="section-label">📄 Job description</div>')
                 jd_file = gr.File(
                     label="Any file (optional if pasting below) — .md/.txt/.docx work best",
-                    file_types=None,
                 )
                 jd_text_box = gr.Textbox(
                     label="Or paste job description text",
