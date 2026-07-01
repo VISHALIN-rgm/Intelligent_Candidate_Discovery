@@ -2174,4 +2174,4 @@ with gr.Blocks(
     )
 
 if __name__ == "__main__":
-    demo.queue().launch(show_api=False)
+    demo.queue().launch(show_api=False, max_file_size="2gb", show_error=True)
