@@ -2059,13 +2059,15 @@ THEME = gr.themes.Soft(
 
 with gr.Blocks(
     title="Redrob Ranker — Intelligent Candidate Discovery & Ranking",
+    theme=THEME,
+    css=CUSTOM_CSS,
 ) as demo:
 
     # ── Hero header ─────────────────────────────────────────────────────
     gr.HTML(
         """
         <div id="hero-header">
-            <div id="hero-badge">REDMIND · India.RUNS Ideathon 2026</div>
+            <div id="hero-badge">REDMIND · India.RUNS 2026</div>
             <h1>🎯 Redrob Ranker</h1>
             <p>Hybrid semantic + rule-based candidate ranking engine — upload a candidate
             pool and a job description to generate a ranked top-100 shortlist with
@@ -2159,9 +2161,4 @@ with gr.Blocks(
     )
 
 if __name__ == "__main__":
-    import inspect
-    launch_params = inspect.signature(demo.launch).parameters
-    if "theme" in launch_params:
-        demo.queue().launch(theme=THEME, css=CUSTOM_CSS)
-    else:
-        demo.queue().launch()
+    demo.queue().launch()
