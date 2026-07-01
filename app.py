@@ -1510,23 +1510,32 @@ def build_reasoning(c: dict, jd: dict, sem_n: float, rs: RuleScores, tier_label:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATA LOADER  (FAST-LOAD FIX: orjson + streamed progress on read bytes)
+# DATA LOADER  (accepts any uploaded file — sniffs gzip/jsonl by content,
+#               not by filename extension)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def load_candidates(path_str: str, progress=None) -> list[dict]:
     """
-    Loads a JSONL / JSONL.GZ candidate file.
+    Loads a candidate file regardless of its filename/extension.
+
+    HF Spaces / gr.File can hand back files with odd or missing extensions
+    (e.g. a temp upload path). Instead of trusting `.gz`, this sniffs the
+    first two bytes for the gzip magic number (1f 8b) and picks the opener
+    accordingly, then parses each line as JSON.
 
     Speed/UX improvements for large files:
       - Uses orjson (C-based) for JSON parsing when available — falls back
         to stdlib json automatically if orjson isn't installed.
       - Reads/parses lines as bytes (skips Python text-decoding overhead).
       - Streams progress updates based on bytes read (uncompressed files;
-        .gz files don't expose a reliable byte-progress cheaply, so those
+        gzip files don't expose a reliable byte-progress cheaply, so those
         just show a periodic "N read" message instead).
     """
     path = Path(path_str)
-    is_gz = path.suffix == ".gz"
+
+    with open(path, "rb") as sniff:
+        magic = sniff.read(2)
+    is_gz = magic == b"\x1f\x8b"
     opener = gzip.open if is_gz else open
 
     try:
@@ -1557,6 +1566,12 @@ def load_candidates(path_str: str, progress=None) -> list[dict]:
                         last_pct = pct
                 elif len(out) % 5000 == 0 and len(out) > 0:
                     progress(0.10, desc=f"Loading candidates... {len(out):,} read")
+
+    if not out:
+        raise gr.Error(
+            "Couldn't find any JSON candidate records in that file. "
+            "Make sure it's a JSONL (one JSON object per line) or gzipped JSONL file."
+        )
 
     return out
 
@@ -1632,7 +1647,7 @@ def run_pipeline(
     progress=gr.Progress(track_tqdm=True),
 ):
     if candidates_file is None:
-        raise gr.Error("Please upload a candidates .jsonl or .jsonl.gz file.")
+        raise gr.Error("Please upload a candidates file (JSONL or gzipped JSONL).")
     if jd_file is None and not (jd_text_box or "").strip():
         raise gr.Error("Please upload a JD file or paste the JD text.")
 
@@ -2084,14 +2099,14 @@ with gr.Blocks(
 
                 gr.HTML('<div class="section-label">👥 Candidate pool</div>')
                 candidates_file = gr.File(
-                    label="",
-                    file_types=[".jsonl", ".gz"],
+                    label="Any file — JSONL / JSONL.GZ recommended, format is auto-detected",
+                    file_types=None,
                 )
 
                 gr.HTML('<div class="section-label">📄 Job description</div>')
                 jd_file = gr.File(
-                    label="Upload .md / .txt / .docx (optional if pasting below)",
-                    file_types=[".md", ".txt", ".docx", ".doc"],
+                    label="Any file (optional if pasting below) — .md/.txt/.docx work best",
+                    file_types=None,
                 )
                 jd_text_box = gr.Textbox(
                     label="Or paste job description text",
