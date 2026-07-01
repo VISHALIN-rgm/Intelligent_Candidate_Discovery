@@ -1016,20 +1016,6 @@ def rule_score(c: dict, jd: dict) -> RuleScores:
         career_score = min(career_score, 0.30)
 
     # ── Positive AI/ML corroboration gate ──────────────────────────────────
-    # A self-reported skills list can be stuffed with AI/ML keywords by a
-    # candidate whose actual title/career has nothing to do with AI/ML
-    # (e.g. a Graphic Designer or Project Manager listing "Pinecone" and
-    # "RAG" as skills). Rather than maintaining a fixed denylist of "wrong"
-    # job titles — which only catches domains someone thought to hardcode
-    # in advance — require at least one piece of *corroborating* evidence
-    # before the skills-list match is allowed to drive career_score up:
-    #   - the title itself reads as AI/ML/retrieval/ranking-relevant, or
-    #   - career/project descriptions show production or retrieval evidence, or
-    #   - the JD's exact operational vocabulary shows up in career text
-    #     (not just the skills list), or
-    #   - a platform-verified skill assessment score exists for a JD skill
-    #     (independent of self-reported skill entries).
-    # This generalizes to any non-AI/ML title, not just ones on a fixed list.
     ai_ml_title_fit = bool(TITLE_FIT_RE.search(combined) or RETRIEVAL_TITLE_RE.search(combined))
     has_verified_assessment = any(
         k.lower() in eff_a for k in sig.get("skill_assessment_scores", {})
@@ -1138,10 +1124,6 @@ def rule_score(c: dict, jd: dict) -> RuleScores:
     conn = sig.get("connection_count", 0)
     behav += 0.02 if conn >= 300 else 0.01 if conn >= 100 else 0.0
 
-    # v3.1: aggregate endorsements_received (redrob_signals) — distinct from
-    # per-skill "endorsements" already used in skill_score above. This is a
-    # platform-level credibility signal that was previously defined in the
-    # signals reference but never read anywhere in scoring.
     endorsements_received = sig.get("endorsements_received", 0)
     behav += (
         0.03 if endorsements_received >= 20 else
@@ -1528,21 +1510,54 @@ def build_reasoning(c: dict, jd: dict, sem_n: float, rs: RuleScores, tier_label:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATA LOADER
+# DATA LOADER  (FAST-LOAD FIX: orjson + streamed progress on read bytes)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_candidates(path_str: str) -> list[dict]:
+def load_candidates(path_str: str, progress=None) -> list[dict]:
+    """
+    Loads a JSONL / JSONL.GZ candidate file.
+
+    Speed/UX improvements for large files:
+      - Uses orjson (C-based) for JSON parsing when available — falls back
+        to stdlib json automatically if orjson isn't installed.
+      - Reads/parses lines as bytes (skips Python text-decoding overhead).
+      - Streams progress updates based on bytes read (uncompressed files;
+        .gz files don't expose a reliable byte-progress cheaply, so those
+        just show a periodic "N read" message instead).
+    """
     path = Path(path_str)
     is_gz = path.suffix == ".gz"
     opener = gzip.open if is_gz else open
+
+    try:
+        import orjson
+        loads = orjson.loads
+    except ImportError:
+        loads = json.loads
+
     out: list[dict] = []
-    with opener(path, "rt", encoding="utf-8", buffering=4 * 1024 * 1024) as f:
-        for line in f:
-            if line and line[0] == "{":
+    file_size = path.stat().st_size if not is_gz else None
+    read_bytes = 0
+    last_pct = -1
+
+    with opener(path, "rb", buffering=4 * 1024 * 1024) as f:
+        for raw_line in f:
+            read_bytes += len(raw_line)
+            if raw_line[:1] == b"{":
                 try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
+                    out.append(loads(raw_line))
+                except ValueError:
                     pass
+
+            if progress is not None:
+                if file_size:
+                    pct = int(read_bytes / file_size * 100)
+                    if pct != last_pct and pct % 5 == 0:
+                        progress(0.08 + 0.07 * (pct / 100), desc=f"Loading candidates... {pct}%")
+                        last_pct = pct
+                elif len(out) % 5000 == 0 and len(out) > 0:
+                    progress(0.10, desc=f"Loading candidates... {len(out):,} read")
+
     return out
 
 
@@ -1640,7 +1655,7 @@ def run_pipeline(
     log.append(f"Weights       : skill {W_SKILL} · career {W_CAREER} · loc {W_LOC} · avail {W_BEHAV}")
 
     progress(0.08, desc="Loading candidates...")
-    all_candidates = load_candidates(candidates_file.name)
+    all_candidates = load_candidates(candidates_file.name, progress=progress)
     log.append(f"Loaded {len(all_candidates):,} candidates")
 
     clean = [c for c in all_candidates if not is_honeypot(c)]
@@ -2044,8 +2059,6 @@ THEME = gr.themes.Soft(
 
 with gr.Blocks(
     title="Redrob Ranker — Intelligent Candidate Discovery & Ranking",
-    theme=THEME,
-    css=CUSTOM_CSS,
 ) as demo:
 
     # ── Hero header ─────────────────────────────────────────────────────
@@ -2131,7 +2144,7 @@ with gr.Blocks(
                 gr.Markdown("### 📋 Run log")
                 log_output = gr.Textbox(label="", lines=14, max_lines=30, show_label=False)
 
-    gr.HTML('<div id="redmind-footer">Built by Team REDMIND · Redrob India.RUNS Ideathon 2026</div>')
+    gr.HTML('<div id="redmind-footer">Built by Team REDMIND · Redrob India.RUNS Data & AI 2026</div>')
 
     analyze_btn.click(
         fn=analyze_jd,
@@ -2146,4 +2159,8 @@ with gr.Blocks(
     )
 
 if __name__ == "__main__":
-    demo.queue().launch()
+    demo.queue().launch(
+        theme=THEME,
+        css=CUSTOM_CSS,
+        max_file_size="2gb",
+    )
