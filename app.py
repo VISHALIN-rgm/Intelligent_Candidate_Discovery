@@ -1754,12 +1754,19 @@ def run_pipeline(
         log.append("[VALIDATION] Top-20 passed all checks.")
 
     rows: list[dict] = []
+    n_strong = n_adjacent = n_filler = 0
     for rank_idx, (hybrid, sem_n, rs, c) in enumerate(top100):
         tier_label = (
             "strong" if hybrid >= strong_thresh else
             "adjacent" if hybrid >= adjacent_thresh else
             "filler"
         )
+        if tier_label == "strong":
+            n_strong += 1
+        elif tier_label == "adjacent":
+            n_adjacent += 1
+        else:
+            n_filler += 1
         rows.append({
             "candidate_id": c["candidate_id"],
             "rank": rank_idx + 1,
@@ -1783,70 +1790,359 @@ def run_pipeline(
     preview_n = max(1, min(int(preview_n), 100))
     preview_df = df.head(preview_n)
 
-    progress(1.0, desc="Done.")
-    return preview_df, str(out_path), "\n".join(log)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GRADIO UI
-# ══════════════════════════════════════════════════════════════════════════════
-
-with gr.Blocks(title="Redrob Ranker — Intelligent Candidate Discovery & Ranking") as demo:
-    gr.Markdown(
-        "# Redrob Ranker\n"
-        "Hybrid semantic + rule-based candidate ranking for the Redrob "
-        "Intelligent Candidate Discovery & Ranking challenge. "
-        "Upload a candidate pool and a job description to produce a ranked "
-        "top-100 submission with per-candidate reasoning."
+    stats_html = _format_stats_html(
+        total=len(all_candidates),
+        honeypots=len(all_candidates) - len(clean),
+        relevant=len(relevant),
+        n_strong=n_strong,
+        n_adjacent=n_adjacent,
+        n_filler=n_filler,
+        elapsed=elapsed,
     )
 
-    with gr.Row():
+    progress(1.0, desc="Done.")
+    return preview_df, str(out_path), "\n".join(log), stats_html
+
+
+def _format_stats_html(total, honeypots, relevant, n_strong, n_adjacent, n_filler, elapsed) -> str:
+    stats = [
+        ("📥", str(total), "Candidates loaded"),
+        ("🛡️", str(honeypots), "Honeypots removed"),
+        ("🎯", str(relevant), "Passed relevance filter"),
+        ("🟢", str(n_strong), "Strong-tier matches"),
+        ("🟡", str(n_adjacent), "Adjacent-tier matches"),
+        ("⚪", str(n_filler), "Filler-tier matches"),
+        ("⏱️", f"{elapsed:.1f}s", "Total runtime"),
+    ]
+    cards = "".join(
+        f"""
+        <div class="stat-card">
+            <div class="stat-icon">{icon}</div>
+            <div class="stat-value">{value}</div>
+            <div class="stat-label">{label}</div>
+        </div>
+        """
+        for icon, value, label in stats
+    )
+    return f'<div class="stats-grid">{cards}</div>'
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GRADIO UI — REDMIND polish pass (custom theme + animations)
+# ══════════════════════════════════════════════════════════════════════════════
+
+CUSTOM_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+    --redrob-primary: #6D28D9;
+    --redrob-primary-dark: #4C1D95;
+    --redrob-accent: #F59E0B;
+}
+
+.gradio-container {
+    max-width: 1400px !important;
+    margin: 0 auto !important;
+    font-family: 'Inter', 'Segoe UI', sans-serif !important;
+    animation: fadeInPage 0.6s ease both;
+}
+
+@keyframes fadeInPage {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes floatIn {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmer {
+    0% { background-position: -400px 0; }
+    100% { background-position: 400px 0; }
+}
+
+@keyframes pulseGlow {
+    0%, 100% { box-shadow: 0 6px 18px rgba(109, 40, 217, 0.35); }
+    50% { box-shadow: 0 10px 28px rgba(168, 85, 247, 0.55); }
+}
+
+@keyframes popIn {
+    0% { opacity: 0; transform: scale(0.85); }
+    70% { transform: scale(1.03); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes badgePulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.06); }
+}
+
+/* Hero header */
+#hero-header {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(120deg, #6D28D9 0%, #7C3AED 45%, #A855F7 100%);
+    border-radius: 18px;
+    padding: 34px 36px;
+    margin-bottom: 22px;
+    box-shadow: 0 10px 30px rgba(109, 40, 217, 0.25);
+    animation: floatIn 0.7s ease both;
+}
+#hero-header::after {
+    content: "";
+    position: absolute;
+    top: -60%;
+    left: -20%;
+    width: 60%;
+    height: 220%;
+    background: rgba(255,255,255,0.08);
+    transform: rotate(20deg);
+    animation: shimmer 5s linear infinite;
+}
+#hero-header h1 {
+    color: #ffffff !important;
+    font-size: 2.15rem !important;
+    font-weight: 800 !important;
+    margin-bottom: 4px !important;
+}
+#hero-header p {
+    color: #EDE9FE !important;
+    font-size: 1rem !important;
+    margin: 0 !important;
+    max-width: 760px;
+}
+#hero-badge {
+    display: inline-block;
+    background: rgba(255,255,255,0.18);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.35);
+    border-radius: 999px;
+    padding: 4px 14px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    margin-bottom: 10px;
+    animation: badgePulse 2.4s ease-in-out infinite;
+}
+
+/* Section cards */
+.redrob-card {
+    background: #ffffff;
+    border: 1px solid #ECECF3;
+    border-radius: 16px;
+    padding: 20px !important;
+    box-shadow: 0 2px 10px rgba(20, 20, 43, 0.04);
+    animation: floatIn 0.6s ease both;
+    transition: box-shadow 0.25s ease, transform 0.25s ease;
+}
+.redrob-card:hover {
+    box-shadow: 0 8px 24px rgba(109, 40, 217, 0.10);
+    transform: translateY(-2px);
+}
+
+/* Section labels */
+.section-label {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: #4C1D95;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Run button */
+#run-btn {
+    background: linear-gradient(120deg, #6D28D9, #A855F7) !important;
+    border: none !important;
+    color: #fff !important;
+    font-weight: 700 !important;
+    font-size: 1.05rem !important;
+    border-radius: 12px !important;
+    padding: 14px 0 !important;
+    animation: pulseGlow 2.6s ease-in-out infinite;
+    transition: transform 0.15s ease !important;
+}
+#run-btn:hover {
+    transform: translateY(-2px) scale(1.01);
+}
+#run-btn:active {
+    transform: translateY(0) scale(0.99);
+}
+
+/* Analyze button */
+#analyze-btn {
+    transition: transform 0.15s ease !important;
+}
+#analyze-btn:hover {
+    transform: translateY(-1px);
+}
+
+/* Stats grid (post-run summary cards) */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 12px;
+    margin-top: 4px;
+}
+.stat-card {
+    background: linear-gradient(160deg, #FAFAFF 0%, #F3EEFE 100%);
+    border: 1px solid #E9E2FB;
+    border-radius: 14px;
+    padding: 14px 10px;
+    text-align: center;
+    animation: popIn 0.5s ease both;
+}
+.stat-icon {
+    font-size: 1.3rem;
+    margin-bottom: 2px;
+}
+.stat-value {
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--redrob-primary-dark);
+    line-height: 1.1;
+}
+.stat-label {
+    font-size: 0.72rem;
+    color: #6B7280;
+    font-weight: 600;
+    margin-top: 2px;
+}
+
+/* Results table */
+#results-table table {
+    border-radius: 12px !important;
+    overflow: hidden !important;
+}
+#results-table {
+    animation: floatIn 0.5s ease both;
+}
+
+/* Footer */
+#redmind-footer {
+    text-align: center;
+    color: #9CA3AF;
+    font-size: 0.8rem;
+    padding: 20px 0 8px 0;
+    animation: floatIn 0.8s ease both;
+}
+"""
+
+THEME = gr.themes.Soft(
+    primary_hue=gr.themes.colors.purple,
+    secondary_hue=gr.themes.colors.amber,
+    neutral_hue=gr.themes.colors.slate,
+    font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+).set(
+    button_primary_background_fill="linear-gradient(120deg, #6D28D9, #A855F7)",
+    button_primary_background_fill_hover="linear-gradient(120deg, #5B21B6, #9333EA)",
+    block_radius="16px",
+    block_shadow="0 2px 10px rgba(20,20,43,0.05)",
+)
+
+with gr.Blocks(
+    title="Redrob Ranker — Intelligent Candidate Discovery & Ranking",
+    theme=THEME,
+    css=CUSTOM_CSS,
+) as demo:
+
+    # ── Hero header ─────────────────────────────────────────────────────
+    gr.HTML(
+        """
+        <div id="hero-header">
+            <div id="hero-badge">REDMIND · India.RUNS Ideathon 2026</div>
+            <h1>🎯 Redrob Ranker</h1>
+            <p>Hybrid semantic + rule-based candidate ranking engine — upload a candidate
+            pool and a job description to generate a ranked top-100 shortlist with
+            transparent, per-candidate reasoning.</p>
+        </div>
+        """
+    )
+
+    with gr.Row(equal_height=False):
+        # ── Left: inputs ────────────────────────────────────────────────
         with gr.Column(scale=1):
-            candidates_file = gr.File(
-                label="Candidates file (.jsonl or .jsonl.gz)",
-                file_types=[".jsonl", ".gz"],
-            )
-            jd_file = gr.File(
-                label="Job description file (.md, .txt, .docx) — optional if pasting text below",
-                file_types=[".md", ".txt", ".docx", ".doc"],
-            )
-            jd_text_box = gr.Textbox(
-                label="Or paste job description text",
-                lines=8,
-                placeholder="Paste the job description here...",
-            )
+            with gr.Group(elem_classes="redrob-card"):
+                gr.Markdown("### 📥 Step 1 — Upload your data")
 
-            with gr.Accordion("Advanced settings", open=False):
-                prefilter = gr.Slider(
-                    label="Rule-scoring prefilter pool size (candidates passed to semantic search)",
-                    minimum=50, maximum=1000, step=50, value=300,
-                )
-                preview_n = gr.Slider(
-                    label="Rows to preview in the table",
-                    minimum=10, maximum=100, step=10, value=100,
-                )
-                strong_pct = gr.Slider(
-                    label="Strong-tier percentile threshold", minimum=0, maximum=100, step=5, value=60,
-                )
-                adjacent_pct = gr.Slider(
-                    label="Adjacent-tier percentile threshold", minimum=0, maximum=100, step=5, value=30,
+                gr.HTML('<div class="section-label">👥 Candidate pool</div>')
+                candidates_file = gr.File(
+                    label="",
+                    file_types=[".jsonl", ".gz"],
                 )
 
-            run_btn = gr.Button("Run ranking", variant="primary")
+                gr.HTML('<div class="section-label">📄 Job description</div>')
+                jd_file = gr.File(
+                    label="Upload .md / .txt / .docx (optional if pasting below)",
+                    file_types=[".md", ".txt", ".docx", ".doc"],
+                )
+                jd_text_box = gr.Textbox(
+                    label="Or paste job description text",
+                    lines=7,
+                    placeholder="Paste the job description here...",
+                )
 
+                analyze_btn = gr.Button("🔍 Preview JD Understanding", size="sm", elem_id="analyze-btn")
+                jd_summary_box = gr.Markdown(visible=True)
+
+            with gr.Group(elem_classes="redrob-card"):
+                with gr.Accordion("⚙️ Advanced settings", open=False):
+                    prefilter = gr.Slider(
+                        label="Rule-scoring prefilter pool size",
+                        minimum=50, maximum=1000, step=50, value=300,
+                    )
+                    preview_n = gr.Slider(
+                        label="Rows to preview in the table",
+                        minimum=10, maximum=100, step=10, value=100,
+                    )
+                    strong_pct = gr.Slider(
+                        label="Strong-tier percentile threshold",
+                        minimum=0, maximum=100, step=5, value=60,
+                    )
+                    adjacent_pct = gr.Slider(
+                        label="Adjacent-tier percentile threshold",
+                        minimum=0, maximum=100, step=5, value=30,
+                    )
+
+            run_btn = gr.Button("🚀 Run Ranking", elem_id="run-btn", size="lg")
+
+        # ── Right: outputs ──────────────────────────────────────────────
         with gr.Column(scale=2):
-            results_table = gr.Dataframe(
-                label="Top candidates (preview)",
-                headers=["candidate_id", "rank", "score", "tier", "reasoning"],
-                wrap=True,
-            )
-            csv_output = gr.File(label="Download submission.csv")
-            log_output = gr.Textbox(label="Run log", lines=16, max_lines=30)
+            with gr.Group(elem_classes="redrob-card"):
+                gr.Markdown("### 📊 Run Summary")
+                stats_output = gr.HTML(
+                    '<div class="stats-grid"></div>'
+                )
+
+            with gr.Group(elem_classes="redrob-card"):
+                gr.Markdown("### 🏆 Top Candidates")
+                results_table = gr.Dataframe(
+                    label="",
+                    headers=["candidate_id", "rank", "score", "tier", "reasoning"],
+                    wrap=True,
+                    elem_id="results-table",
+                )
+                with gr.Row():
+                    csv_output = gr.File(label="⬇️ Download submission.csv")
+
+            with gr.Group(elem_classes="redrob-card"):
+                gr.Markdown("### 📋 Run log")
+                log_output = gr.Textbox(label="", lines=14, max_lines=30, show_label=False)
+
+    gr.HTML('<div id="redmind-footer">Built by Team REDMIND · Redrob India.RUNS Ideathon 2026</div>')
+
+    analyze_btn.click(
+        fn=analyze_jd,
+        inputs=[jd_file, jd_text_box],
+        outputs=[jd_summary_box],
+    )
 
     run_btn.click(
         fn=run_pipeline,
         inputs=[candidates_file, jd_file, jd_text_box, prefilter, preview_n, strong_pct, adjacent_pct],
-        outputs=[results_table, csv_output, log_output],
+        outputs=[results_table, csv_output, log_output, stats_output],
     )
 
 if __name__ == "__main__":
